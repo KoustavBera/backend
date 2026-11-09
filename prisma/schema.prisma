@@ -1,0 +1,413 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [pgcrypto, citext]
+}
+
+enum UserRoleType {
+  teacher
+  admin
+
+  @@map("user_role_enum")
+}
+
+enum DeletionStatus {
+  pending
+  processing
+  completed
+  failed
+
+  @@map("deletion_status")
+}
+
+enum ResourceCategory {
+  video
+  notes
+  book
+  pyq
+
+  @@map("resource_category")
+}
+
+enum ResourceFormat {
+  youtube
+  pdf
+  image
+
+  @@map("resource_format")
+}
+
+model User {
+  id               String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email            String                @unique
+  passwordHash     String                @map("password_hash")
+  displayName      String                @map("display_name")
+  isActive         Boolean               @default(true) @map("is_active")
+  failedLoginCount Int                   @default(0) @db.SmallInt @map("failed_login_count")
+  lockedUntil      DateTime?             @db.Timestamptz @map("locked_until")
+  createdAt        DateTime              @default(now()) @db.Timestamptz @map("created_at")
+  updatedAt        DateTime              @default(now()) @updatedAt @db.Timestamptz @map("updated_at")
+
+  roles            UserRole[]
+  classAssignments UserClassAssignment[]
+  refreshTokens    RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+  auditLogs        AuditLog[]
+  createdSubjects  Subject[]             @relation("CreatedSubjects")
+  uploadedResources Resource[]           @relation("UploadedResources")
+  uploadIntents    UploadIntent[]
+  reviewedEnquiries AdmissionEnquiry[]
+  createdAnnouncements Announcement[]    @relation("CreatedAnnouncements")
+  createdFaculty   FacultyMember[]       @relation("CreatedFaculty")
+  createdGalleryPhotos GalleryPhoto[]    @relation("CreatedGalleryPhotos")
+
+  @@map("users")
+}
+
+model UserRole {
+  userId String       @map("user_id") @db.Uuid
+  role   UserRoleType
+
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, role])
+  @@map("user_roles")
+}
+
+model Class {
+  id        String @id // e.g. 'class-1', 'class-2', ..., 'class-12'
+  number    Int    @unique @db.SmallInt
+  roman     String
+  label     String
+  board     String // 'Primary' | 'Upper Primary' | 'Secondary' | 'Higher Secondary'
+  sortOrder Int    @map("sort_order") @db.SmallInt
+
+  userAssignments UserClassAssignment[]
+  subjects        Subject[]
+
+  @@map("classes")
+}
+
+model UserClassAssignment {
+  userId  String @map("user_id") @db.Uuid
+  classId String @map("class_id")
+
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  class   Class  @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@id([userId, classId])
+  @@map("user_class_assignments")
+}
+
+model RefreshToken {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String        @map("user_id") @db.Uuid
+  tokenHash    String        @unique @map("token_hash")
+  familyId     String        @map("family_id") @db.Uuid
+  replacedById String?       @map("replaced_by_id") @db.Uuid
+  expiresAt    DateTime      @db.Timestamptz @map("expires_at")
+  revokedAt    DateTime?     @db.Timestamptz @map("revoked_at")
+  createdAt    DateTime      @default(now()) @db.Timestamptz @map("created_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replacedBy   RefreshToken? @relation("TokenRotation", fields: [replacedById], references: [id], onDelete: SetNull)
+  predecessors RefreshToken[] @relation("TokenRotation")
+
+  @@index([userId, expiresAt], map: "idx_refresh_tokens_user")
+  @@index([familyId], map: "idx_refresh_tokens_family")
+  @@index([tokenHash, revokedAt], map: "idx_refresh_tokens_hash_rev")
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @db.Timestamptz @map("expires_at")
+  usedAt    DateTime? @db.Timestamptz @map("used_at")
+  createdAt DateTime  @default(now()) @db.Timestamptz @map("created_at")
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt], map: "idx_prt_user")
+  @@map("password_reset_tokens")
+}
+
+model LoginAttempt {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email       String
+  ip          String
+  attemptedAt DateTime @default(now()) @db.Timestamptz @map("attempted_at")
+  succeeded   Boolean
+
+  @@index([email, attemptedAt(sort: Desc)], map: "idx_login_attempts_email_time")
+  @@index([ip, attemptedAt(sort: Desc)], map: "idx_login_attempts_ip_time")
+  @@map("login_attempts")
+}
+
+model Subject {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  classId   String   @map("class_id")
+  slug      String
+  name      String   @db.Citext
+  nameBn    String?  @map("name_bn")
+  icon      String   @default("book")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdBy String?  @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @db.Timestamptz @map("updated_at")
+
+  class         Class          @relation(fields: [classId], references: [id], onDelete: Restrict)
+  creator       User?          @relation("CreatedSubjects", fields: [createdBy], references: [id], onDelete: SetNull)
+  resources     Resource[]
+  uploadIntents UploadIntent[]
+
+  @@unique([classId, slug], map: "uq_subject_class_slug")
+  @@unique([classId, name], map: "uq_subject_class_name")
+  @@index([classId], map: "idx_subjects_class_id")
+  @@map("subjects")
+}
+
+model Resource {
+  id           String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  subjectId    String           @map("subject_id") @db.Uuid
+  category     ResourceCategory
+  format       ResourceFormat
+  title        String
+  chapter      String?
+  objectKey    String?          @map("object_key")
+  youtubeUrl   String?          @map("youtube_url")
+  uploadedBy   String?          @map("uploaded_by") @db.Uuid
+  uploadedAt   DateTime         @default(now()) @db.Timestamptz @map("uploaded_at")
+  isPublished  Boolean          @default(false) @map("is_published")
+  academicYear String           @map("academic_year") // e.g. '2025-26'
+
+  subject  Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  uploader User?   @relation("UploadedResources", fields: [uploadedBy], references: [id], onDelete: SetNull)
+
+  @@index([subjectId], map: "idx_resources_subject")
+  @@index([subjectId, academicYear], map: "idx_resources_year")
+  @@index([subjectId, uploadedBy], map: "idx_resources_draft")
+  @@map("resources")
+}
+
+model UploadIntent {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  subjectId   String?   @map("subject_id") @db.Uuid
+  objectKey   String    @unique @map("object_key")
+  contentType String    @map("content_type")
+  sizeBytes   BigInt    @map("size_bytes")
+  expiresAt   DateTime  @db.Timestamptz @map("expires_at")
+  finalizedAt DateTime? @db.Timestamptz @map("finalized_at")
+  createdAt   DateTime  @default(now()) @db.Timestamptz @map("created_at")
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject Subject? @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt], map: "idx_upload_intents_expires")
+  @@map("upload_intents")
+}
+
+model PendingDeletion {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  objectKey     String         @map("object_key")
+  status        DeletionStatus @default(pending)
+  attemptCount  Int            @default(0) @db.SmallInt @map("attempt_count")
+  maxAttempts   Int            @default(5) @db.SmallInt @map("max_attempts")
+  nextAttemptAt DateTime       @default(now()) @db.Timestamptz @map("next_attempt_at")
+  lastError     String?        @map("last_error")
+  createdAt     DateTime       @default(now()) @db.Timestamptz @map("created_at")
+  updatedAt     DateTime       @default(now()) @updatedAt @db.Timestamptz @map("updated_at")
+
+  @@index([status, nextAttemptAt], map: "idx_pending_deletions_queue")
+  @@map("pending_deletions")
+}
+
+model AuditLog {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String?  @map("user_id") @db.Uuid
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  metadata   Json?    @db.JsonB
+  ip         String?
+  createdAt  DateTime @default(now()) @db.Timestamptz @map("created_at")
+
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId, createdAt(sort: Desc)], map: "idx_audit_entity")
+  @@index([userId, createdAt(sort: Desc)], map: "idx_audit_user")
+  @@map("audit_logs")
+}
+
+model NewsArticle {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug          String    @unique
+  tag           String
+  category      String    @default("Press release")
+  title         String
+  dateDisplay   String    @map("date_display")
+  publishedAt   DateTime? @db.Timestamptz @map("published_at")
+  location      String    @default("")
+  imageKey      String?   @map("image_key")
+  imageCaption  String?   @map("image_caption")
+  description   String
+  lead          String?
+  body          Json      @default("[]") @db.JsonB
+  quote         Json?     @db.JsonB
+  articleAuthor Json?     @db.JsonB @map("article_author")
+  isPublished   Boolean   @default(false) @map("is_published")
+  createdAt     DateTime  @default(now()) @db.Timestamptz @map("created_at")
+  updatedAt     DateTime  @default(now()) @updatedAt @db.Timestamptz @map("updated_at")
+
+  attachments   NewsAttachment[]
+  relationsFrom NewsRelation[]   @relation("ArticleRelationsFrom")
+  relationsTo   NewsRelation[]   @relation("ArticleRelationsTo")
+
+  @@index([publishedAt(sort: Desc)], map: "idx_news_published")
+  @@index([slug], map: "idx_news_slug")
+  @@map("news_articles")
+}
+
+model NewsAttachment {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  articleId  String   @map("article_id") @db.Uuid
+  objectKey  String   @map("object_key")
+  title      String
+  type       String   // 'pdf' | 'zip' | 'doc' | 'image'
+  sizeBytes  BigInt?  @map("size_bytes")
+  sortOrder  Int      @default(0) @db.SmallInt @map("sort_order")
+
+  article    NewsArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@map("news_attachments")
+}
+
+model NewsRelation {
+  articleId        String @map("article_id") @db.Uuid
+  relatedArticleId String @map("related_article_id") @db.Uuid
+  sortOrder        Int    @default(0) @db.SmallInt @map("sort_order")
+
+  article          NewsArticle @relation("ArticleRelationsFrom", fields: [articleId], references: [id], onDelete: Cascade)
+  relatedArticle   NewsArticle @relation("ArticleRelationsTo", fields: [relatedArticleId], references: [id], onDelete: Cascade)
+
+  @@id([articleId, relatedArticleId])
+  @@map("news_relations")
+}
+
+enum AdmissionStatus {
+  new
+  read
+  replied
+  closed
+}
+
+model AdmissionEnquiry {
+  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  parentName    String          @map("parent_name")
+  phone         String
+  email         String?
+  classInterest String?         @map("class_interest")
+  message       String?
+  status        AdmissionStatus @default(new)
+  submittedAt   DateTime        @default(now()) @db.Timestamptz @map("submitted_at")
+  reviewedBy    String?         @map("reviewed_by") @db.Uuid
+  reviewedAt    DateTime?       @db.Timestamptz @map("reviewed_at")
+  purgeAfter    DateTime?       @default(dbgenerated("(now() + '2 years'::interval)")) @db.Timestamptz @map("purge_after")
+
+  reviewer      User?           @relation(fields: [reviewedBy], references: [id], onDelete: SetNull)
+
+  @@index([submittedAt(sort: Desc)], map: "idx_enquiries_submitted")
+  @@index([purgeAfter], map: "idx_enquiries_purge")
+  @@map("admission_enquiries")
+}
+
+enum AnnouncementSeverity {
+  info
+  warning
+  urgent
+}
+
+model Announcement {
+  id          String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  textEn      String               @map("text_en")
+  textBn      String?              @map("text_bn")
+  link        String?              // e.g. "/#admissions", "/study-zone", "/news/...", or external
+  severity    AnnouncementSeverity @default(info)
+  isActive    Boolean              @default(true) @map("is_active")
+  sortOrder   Int                  @default(0) @db.SmallInt @map("sort_order")
+  startDate   DateTime?            @db.Timestamptz @map("start_date")
+  endDate     DateTime?            @db.Timestamptz @map("end_date")
+  createdById String?              @map("created_by") @db.Uuid
+  createdAt   DateTime             @default(now()) @db.Timestamptz @map("created_at")
+  updatedAt   DateTime             @default(now()) @updatedAt @db.Timestamptz @map("updated_at")
+
+  creator     User?                @relation("CreatedAnnouncements", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([isActive, sortOrder], map: "idx_announcements_active_order")
+  @@index([startDate, endDate], map: "idx_announcements_dates")
+  @@map("announcements")
+}
+
+model FacultyMember {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug          String    @unique
+  name          String
+  nameBn        String?   @map("name_bn")
+  designation   String
+  designationBn String?   @map("designation_bn")
+  department    String    @default("General")
+  education     String
+  educationBn   String?   @map("education_bn")
+  description   String?
+  photoKey      String?   @map("photo_key")
+  sortOrder     Int       @default(0) @db.SmallInt @map("sort_order")
+  isActive      Boolean   @default(true) @map("is_active")
+  createdById   String?   @map("created_by") @db.Uuid
+  createdAt     DateTime  @default(now()) @db.Timestamptz @map("created_at")
+  updatedAt     DateTime  @default(now()) @updatedAt @db.Timestamptz @map("updated_at")
+
+  creator       User?     @relation("CreatedFaculty", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([sortOrder, createdAt], map: "idx_faculty_order")
+  @@index([department], map: "idx_faculty_dept")
+  @@index([slug], map: "idx_faculty_slug")
+  @@map("faculty_members")
+}
+
+enum GalleryCategory {
+  campus
+  events
+  sports
+  academics
+  celebrations
+
+  @@map("gallery_category")
+}
+
+model GalleryPhoto {
+  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title       String
+  titleBn     String?         @map("title_bn")
+  category    GalleryCategory @default(campus)
+  description String?
+  photoKey    String          @map("photo_key")
+  sortOrder   Int             @default(0) @db.SmallInt @map("sort_order")
+  isActive    Boolean         @default(true) @map("is_active")
+  createdById String?         @map("created_by") @db.Uuid
+  createdAt   DateTime        @default(now()) @db.Timestamptz @map("created_at")
+  updatedAt   DateTime        @default(now()) @updatedAt @db.Timestamptz @map("updated_at")
+
+  creator     User?           @relation("CreatedGalleryPhotos", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([isActive, sortOrder, createdAt(sort: Desc)], map: "idx_gallery_active_order")
+  @@index([category], map: "idx_gallery_category")
+  @@map("gallery_photos")
+}
